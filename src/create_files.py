@@ -10,8 +10,10 @@ def create_main_py(dst, module_name, path):
     :return: boolean of successfulness
     """
     try:
+        # get relative path of main.py
+        rel_path = os.path.relpath(path, dst)
         main_py = open(os.path.join(dst, "main.py"), "w")
-        main_py.write(get_main_py_content(module_name, path))
+        main_py.write(get_main_py_content(module_name, rel_path))
         main_py.close()
         print('Created main.py')
     except FileExistsError:
@@ -21,6 +23,9 @@ def create_main_py(dst, module_name, path):
 
 
 def get_main_py_content(module_name, path):
+    # override windows path style
+    path = path.replace('\\', '/')
+    path = path.replace('\\\\', '/')
     """
     Returns content for main.py
     :param module_name: name of the module with spider class
@@ -30,9 +35,10 @@ def get_main_py_content(module_name, path):
     return f"""import os
 import sys
 import importlib.util
+import importlib  
+from apify_scrapy_executor import SpiderExecutor
 
 from apify_client import ApifyClient
-from apify_scrapy_executor import SpiderExecutor
 
 # loading spider module
 spec = importlib.util.spec_from_file_location('{module_name}', '{path}')
@@ -62,10 +68,9 @@ def create_input_schema(dst, name, inputs):
     try:
         input_schema = open(os.path.join(dst, "INPUT_SCHEMA.json"), "w")
         content = get_input_schema_content(name, inputs)
-
         input_schema.write(content)
         input_schema.close()
-        print('Created apify.json')
+        print('Created INPUT_SCHEMA.json')
     except FileExistsError:
         print("Tried to create file 'apify.json', but file already exists.")
         return False
@@ -79,29 +84,38 @@ def get_input_schema_content(name, inputs):
     :param inputs: inputs to be defined
     :return: str of INPUT_SCHEMA.json content
     """
-    properties = ''
-
-    for inp in inputs:
-        inp_type = 'string'
-        prefill = ''
-        if inp[1] is not None:
-            if inp[1].isdigit() or (inp[1][0] == '-' and inp[1][1:].isdigit()):
-                inp_type = 'integer'
-            prefill = f""",\n\t\t\t"prefill": "{inp[1]}\""""
-        properties += f""""{inp[0]}": {{
-            "title": "{inp[0]}",
-            "type": "{inp_type}",
-            "description": "{inp[0]}"{prefill}
-        }},"""
-
     return f"""{{
     "title": "{name} input",
     "type": "object",
     "schemaVersion": 1,
     "properties": {{
-        {properties[:-1]}
+        {get_properties(inputs)[:-1]}
     }}
 }}"""
+
+
+def get_properties(inputs):
+    properties = ''
+    for inp in inputs:
+        inp_type = 'string'
+        editor = 'textfield'
+        prefill_value = ''
+        prefill = ''
+        if inp[1] is not None:
+            if isinstance(inp[1], int):
+                inp_type = 'integer'
+                editor = 'number'
+                prefill_value = inp[1]
+            else:
+                prefill_value = f'"{inp[1]}"'
+            prefill = f""",\n\t\t\t"prefill": {prefill_value}"""
+        properties += f""""{inp[0]}": {{
+            "title": "{inp[0]}",
+            "type": "{inp_type}",
+            "editor": "{editor}",
+            "description": "{inp[0]}"{prefill}
+        }},"""
+    return properties
 
 
 def create_apify_json(dst: str):
@@ -144,7 +158,7 @@ def get_apify_json_content(dst):
 
         return f"""{{
         "name": "{name}",
-        "version": "0.0.1",
+        "version": "0.1",
         "buildTag": "latest",
         "env": null
 }}"""
@@ -175,11 +189,19 @@ def get_dockerfile_content():
     Returns content for Dockerfile
     :return: str of Dockerfile content
     """
-    return f"""FROM apify/actor-python:3.9
-CMD pipreqs --force
+    return f"""# First, specify the base Docker image.
+# You can see the Docker images from Apify at https://hub.docker.com/r/apify/.
+# You can also use any other image from Docker Hub.
+FROM apify/actor-python:3.9
 
+# Second, copy just requirements.txt into the actor image,
+# since it should be the only file that affects "pip install" in the next step,
+# in order to speed up the build
 COPY requirements.txt ./
 
+# Install the packages specified in requirements.txt,
+# Print the installed Python version, pip version
+# and all installed packages with their versions for debugging
 RUN echo "Python version:" \
  && python --version \
  && echo "Pip version:" \
@@ -188,6 +210,13 @@ RUN echo "Python version:" \
  && pip install -r requirements.txt \
  && echo "All installed Python packages:" \
  && pip freeze
+
+# Next, copy the remaining files and directories with the source code.
+# Since we do this after installing the dependencies, quick build will be really fast
+# for most source file changes.
 COPY . ./
 
-CMD python3 main.py"""
+# Specify how to launch the source code of your actor.
+# By default, the main.py file is run
+CMD python3 main.py
+"""
