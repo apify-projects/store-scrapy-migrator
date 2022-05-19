@@ -95,20 +95,27 @@ def get_input_schema_content(name, inputs):
 
 
 def get_properties(inputs):
+    """
+    Creates properties for each input
+    :param inputs: inputs to be defined
+    :return: str of properties
+    """
     properties = ''
     for inp in inputs:
         inp_type = 'string'
         editor = 'textfield'
-        prefill_value = ''
+        prefill_type = 'prefill'
+
         prefill = ''
         if inp[1] is not None:
             if isinstance(inp[1], int):
                 inp_type = 'integer'
                 editor = 'number'
+                prefill_type = 'default'
                 prefill_value = inp[1]
             else:
                 prefill_value = f'"{inp[1]}"'
-            prefill = f""",\n\t\t\t"prefill": {prefill_value}"""
+            prefill = f""",\n\t\t\t"{prefill_type}": {prefill_value}"""
         properties += f""""{inp[0]}": {{
             "title": "{inp[0]}",
             "type": "{inp_type}",

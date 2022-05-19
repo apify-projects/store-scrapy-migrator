@@ -7,6 +7,10 @@ from .create_files import create_dockerfile, create_main_py, create_apify_json, 
 
 
 def parse_input():
+    """
+    Parses input from the CLI
+    """
+
     parser = argparse.ArgumentParser()
     parser.add_argument("-m", "--migrate", help="Wraps scrapy project with files to be pushed to Apify platform",
                         type=str, dest='migrate_folder')
@@ -48,6 +52,7 @@ def update_reqs(dst):
             lines = remove_invalid_reqs(unsafe_split_lines)
         with open(reqs_file, 'w') as reqs:
             reqs.writelines([x[0] + '==' + x[1] + '\n' for x in lines])
+        print('Created requirements.txt')
         return True
 
     # create tmp file to save user requirements and call pipreqs
@@ -220,7 +225,7 @@ def wrap_scrapy(dst: str):
     spiders, inputs = _get_and_update_spiders_and_input(dst)
 
     return create_dockerfile(dst) and create_apify_json(dst) and create_main_py(dst, spiders[0][0], spiders[0][1]) \
-           and update_reqs(dst)
+        and update_reqs(dst)
 
 
 def get_spiders_folder(dst):
@@ -267,7 +272,7 @@ def get_inputs(filename):
     """
     file = open(filename, 'r')
     lines = file.readlines()
-    GETATTR_SELF = 'getattr(self'
+    getattr_self = 'getattr(self'
     index = 0
 
     # find class with spider
@@ -281,7 +286,7 @@ def get_inputs(filename):
     # find getattr in the current class
     index += 1
     while index < len(lines) and not lines[index].lstrip().startswith('class'):
-        if GETATTR_SELF in lines[index]:
+        if getattr_self in lines[index]:
             value = get_input(lines[index])
             if value:
                 inputs.append(value)
@@ -296,10 +301,9 @@ def get_input(line):
     :param line: line with getattr() method call
     :return: tuple of name,default value. None if value could not retrieve
     """
-    GETATTR_SELF = 'getattr(self'
-    start_chars = ['\'', '"', '-']
+    getattr_self = 'getattr(self'
     try:
-        index = line.index(GETATTR_SELF) + len(GETATTR_SELF)
+        index = line.index(getattr_self) + len(getattr_self)
     except ValueError:
         # getattr() was not found
         return None
@@ -371,6 +375,12 @@ def get_attr_name(line, index):
 
 
 def get_default_value(line, index):
+    """
+    Get default value from the getattr function
+    :param line: string of a text
+    :param index: index of a first letter of a text
+    :return: default value of None if default value cannot be located or recognized
+    """
     if index >= len(line):
         return None
 
@@ -423,5 +433,5 @@ def get_default_value(line, index):
         return num
 
 
-if __name__ == '__main__':
+if __name__ == '__main__': # for debug purposes
     parse_input()
