@@ -1,16 +1,16 @@
 import os
+import shutil
 import sys
 import argparse
-import subprocess
 
-from .create_files import create_dockerfile, create_main_py, create_apify_json, create_input_schema
+from create_files import create_dockerfile, create_main_py, create_apify_json, create_input_schema, create_readme, \
+    update_reqs
 
 
 def parse_input():
     """
     Parses input from the CLI
     """
-
     parser = argparse.ArgumentParser()
     parser.add_argument("-m", "--migrate", help="Wraps scrapy project with files to be pushed to Apify platform",
                         type=str, dest='migrate_folder')
@@ -21,180 +21,14 @@ def parse_input():
     args = parser.parse_args()
 
     if args.migrate_folder:
+        # whole wrap
         wrap_scrapy(args.migrate_folder)
     else:
+        # updates
         if args.input_folder:
-            _get_and_update_spiders_and_input(args.input_folder)
+            create_or_update_input(args.input_folder)
         if args.reqs_folder:
             update_reqs(args.reqs_folder)
-
-
-def update_reqs(dst):
-    """
-    Creates or updates requirements.txt of a project. Runs pipreqs. If requirements exists, appends with pipreqs result
-    :param dst: destination of scrapy project
-    :return: boolean of successfulness
-    """
-
-    # check correct dst
-    if not os.path.exists(os.path.join(dst, 'scrapy.cfg')):
-        print('Select root directory with "scrapy.cfg" file.')
-        return False
-
-    import pipreqs
-    reqs_file = os.path.join(dst, 'requirements.txt')
-
-    # check if requirements.txt exists
-    if not os.path.exists(os.path.join(dst, 'requirements.txt')):
-        subprocess.run(["pipreqs", dst], stderr=subprocess.DEVNULL)
-        with open(reqs_file, 'r') as reqs:
-            unsafe_split_lines = [x.split('==') for x in reqs.read().splitlines(keepends=False)]
-            lines = remove_invalid_reqs(unsafe_split_lines)
-        with open(reqs_file, 'w') as reqs:
-            reqs.writelines([x[0] + '==' + x[1] + '\n' for x in lines])
-        print('Created requirements.txt')
-        return True
-
-    # create tmp file to save user requirements and call pipreqs
-    reqs_tmp = os.path.join(dst, '.tmp_reqs.tmp_apify')
-
-    if os.path.exists(reqs_tmp):
-        # if tmp file exists, removes it. It should be created only in runs before and shouldn't be user's file.
-        os.remove(reqs_tmp)
-
-    os.rename(reqs_file, reqs_tmp)
-    subprocess.run(["pipreqs", dst], stderr=subprocess.DEVNULL)
-
-    # check for duplicates
-    with open(reqs_file, 'r') as reqs:
-        reqs_lines = reqs.read().splitlines(keepends=False)
-    with open(reqs_tmp, 'r') as tmp:
-        tmp_lines = tmp.read().splitlines(keepends=False)
-
-    complete_reqs = concat_dedup_reqs(reqs_lines, tmp_lines)
-
-    with open(reqs_file, 'w') as reqs:
-        for req in complete_reqs:
-            reqs.write(req + '\n')
-
-    os.remove(reqs_tmp)
-    print('Created requirements.txt')
-    return True
-
-
-def concat_dedup_reqs(reqs_lines, tmp_lines):
-    """
-    Check lines of requirements and concatenates them and removes duplicates
-    :param reqs_lines array of lines of the first requirements file
-    :param tmp_lines array of lines of the second requirements file
-    """
-    # split module name and version number
-    reqs_arr = [line.split('==') for line in reqs_lines]
-    unsafe_tmp_arr = [line.split('==') for line in tmp_lines]
-
-    # removes modules with non-numeric version
-    # bug of pipreqs which adds 'apify_scrapy_executor.egg==info' to requirements
-    tmp_arr = remove_invalid_reqs(unsafe_tmp_arr)
-
-    res = []
-    status = ('', -1)
-
-    for req in reqs_arr:
-        # skips modules with non-numeric version
-        if not is_valid_version(req[1]):
-            continue
-
-        for i in range(len(tmp_arr)):
-            if req[0] in tmp_arr[i]:
-                # duplicate name found
-                status = ('duplicate', i)
-                if req[1] == tmp_arr[i][1]:
-                    # same version
-                    res.append(req[0] + '==' + req[1])
-                else:
-                    # choose higher version
-                    res.append(req[0] + '==' + get_higher_version(req[1], tmp_arr[i][1]))
-                break
-            else:
-                # not duplicate
-                res.append(req[0] + '==' + req[1])
-
-        if status[0] == 'duplicate':
-            # remove duplicate from tmp
-            tmp_arr.remove(tmp_arr[status[1]])
-            status = ('', -1)
-
-    # append reqs left in tmp
-    for req_left in tmp_arr:
-        res.append(req_left[0] + '==' + req_left[1])
-
-    return res
-
-
-def remove_invalid_reqs(req_lines):
-    """
-    Removes modules with non-numeric version. Bug of pipreqs which adds 'apify_scrapy_executor.egg==info'
-    :param req_lines lines from requirements file
-    :returns array of safe lines
-    """
-    safe_lines = []
-    for req in req_lines:
-        if is_valid_version(req[1]):
-            safe_lines.append(req)
-    return safe_lines
-
-
-def is_valid_version(v):
-    """
-    Check if all values of version number separated by '.' is a numeric value
-    :returns boolean
-    """
-    return not (False in [x.isnumeric() for x in v.split('.')])
-
-
-def get_higher_version(v1, v2):
-    """
-    Compares two versions and returns the higher one
-    :param v1 first version
-    :param v2 second version
-    :returns str of one of the versions
-    """
-    v1_split = v1.split('.')
-    v2_split = v2.split('.')
-    for i in range(len(v1_split)):
-        if int(v1_split[i]) > int(v2_split[i]):
-            return v1
-        elif int(v1_split[i]) < int(v2_split[i]):
-            return v2
-
-    # if equal then returns first one
-    return v1
-
-
-def _get_and_update_spiders_and_input(dst):
-    """
-    Creates or updates INPUT_SCHEMA.json of a project
-    :param dst: destination of scrapy project
-    :return: tuple of (name, path) of spider and tuple of (name, default_value) of inputs
-    """
-    # TODO: Should I expect other spiders dir location?
-    spiders_dir = get_spiders_folder(dst)
-
-    if not spiders_dir:
-        print("Cannot find subdirectory 'spiders'.")
-        return None
-
-    # TODO: What to do if multiple spiders? Maybe create multiple directory with as individual actors
-    spiders = get_spiders(spiders_dir)
-
-    if len(spiders) == 0:
-        print('No spiders found in "spiders" subdirectory.')
-        return None
-
-    inputs = get_inputs(spiders[0][1])
-    create_input_schema(dst, spiders[0][0], inputs)
-
-    return spiders, inputs
 
 
 def wrap_scrapy(dst: str):
@@ -216,16 +50,126 @@ def wrap_scrapy(dst: str):
         if file in files_in_dir:
             print("If these files exists, they will be overwritten: 'requirements.txt', 'main.py', 'Dockerfile', "
                   "'apify.json', 'INPUT_SCHEMA.json'. Do you wish to continue? [Y/N]")
-            answer = sys.stdin.read(1)[0]
+            answer = sys.stdin.readline().strip()[0]
             if not (answer == 'y' or answer == 'Y'):
                 return False
             else:
                 break
 
-    spiders, inputs = _get_and_update_spiders_and_input(dst)
+    spider_dir = get_spiders_folder(dst)
 
-    return create_dockerfile(dst) and create_apify_json(dst) and create_main_py(dst, spiders[0][0], spiders[0][1]) \
-        and update_reqs(dst)
+    # could not find spider class
+    if not spider_dir:
+        return False
+
+    spiders = get_spider_classes(spider_dir)
+
+    # found one spider class
+    if len(spiders) == 1:
+        return create_or_update_input(dst, spiders[0]) and create_dockerfile(dst) \
+            and create_apify_json(dst) and create_main_py(dst, spiders[0][0], spiders[0][1]) \
+            and update_reqs(dst) and create_readme(dst, spiders[0][0])
+
+    # found multiple spider classes
+    spider_names = [spider[0] for spider in spiders]
+    copy_files(dst, spiders)
+
+    for spider in spiders:
+        dst_of_spider = os.path.join(dst, spider[0])
+        create_or_update_input(dst_of_spider, spider) and create_dockerfile(dst_of_spider) \
+        and create_apify_json(dst_of_spider) and create_main_py(dst_of_spider, spider[0], spider[1]) \
+        and update_reqs(dst_of_spider) and create_readme(dst_of_spider, spider[0])
+
+
+def copy_files(dst, spiders):
+    """
+    Copy scrapy project. git files are ignored
+    :param dst: destination of scrapy project
+    :param spiders: tuple of names of (spider_name, spider_file)
+    """
+
+    # folder_names
+    script_files = [os.path.split(arr[1])[1] for arr in spiders]
+    spider_names = [arr[0] for arr in spiders]
+
+    # copy files inside the project without script files
+    first_copy_name = os.path.join(dst, spiders[0][0])
+    shutil.copytree(dst, first_copy_name,
+                    ignore=shutil.ignore_patterns('.git*', '.scrapy', *script_files, spider_names[0]))
+
+    # create copies of the first copy and add script file
+    # for name in spider_names[1:]:
+    #    shutil.copytree(first_copy_name, os.path.join(dst, name), ignore=shutil.ignore_patterns('.git*'))
+    #    shutil.copy(spiders[0][1], os.path.join(dst, name))
+
+    for i in range(1, len(spider_names)):
+        shutil.copytree(first_copy_name, os.path.join(dst, spider_names[i]), ignore=shutil.ignore_patterns('.git*'))
+        shutil.copy(spiders[i][1], get_spiders_folder(os.path.join(dst, spider_names[i])))
+
+    # add script file to the first copy
+    shutil.copy(spiders[0][1], get_spiders_folder(first_copy_name))
+
+
+def get_scrapy_list(dst):
+    """
+    Runs a "scrapy list" command in directory and extracting spider names to list
+    :param dst: destination of directory
+    :returns: list of spider names in str
+    """
+    # run "scrapy list" in scrapy directory and save stdout to variable
+    stdout = str(subprocess.run(["scrapy", "list"], cwd=f'{os.path.abspath(dst)}', stdout=subprocess.PIPE).stdout)
+
+    # remove first two chars "'b" and last char "'" created by converting bytecode to string
+    stdout_stripped = stdout[2:-1]
+
+    # remove carriage return to make next lines work both on Windows and Linux
+    stdout_remove_cr = stdout_stripped.replace('\\r', '\\n')
+
+    # split result by newline and remove last empty element
+    stdout_split = stdout_remove_cr.split('\\n')[:-1]
+
+    return stdout_split
+
+
+def is_name_unique(client, name):
+    """
+    Check if migrated project name is unique, otherwise `apify push` is going to overwrite existing project
+    :param client: client class of ApifyClient
+    :param name: name of the migrated project name
+    """
+
+    # check name from list of all client actors
+    names = [actor['name'] for actor in client.actors().list().items]
+    return not (name in names)
+
+
+def create_or_update_input(dst, spider_tuple=None):
+    """
+    Creates or updates INPUT_SCHEMA.json of a project. Tries to find a spider class if spider_tuple is not provided
+    :param dst: destination of scrapy project
+    :param spider_tuple: tuple of (spider_name, spider_destination)
+    :return: boolean of successfulness
+    """
+
+    if spider_tuple is None:
+        spider_tuple = get_spider_classes(spiders_dir)
+
+        if len(spiders) == 0:
+            print('No spiders found in "spiders" subdirectory.')
+            return None
+
+        if len(spiders) > 1:
+            print('Multiple spiders in one directory found. This method requires only one.')
+            return None
+
+    inputs = get_inputs(spider_tuple[1])
+
+    return create_input_schema(os.path.join(dst), spider_tuple[0], inputs)
+
+
+def update_input(dst, spider):
+    inputs = get_inputs(spider)
+    create_input_schema(dst, spider, inputs)
 
 
 def get_spiders_folder(dst):
@@ -240,10 +184,13 @@ def get_spiders_folder(dst):
             spiders_dir = os.path.join(dst, directory, 'spiders')
             break
 
+    if spiders_dir is None:
+        print('Could not find any spider folder in', dst)
+
     return spiders_dir
 
 
-def get_spiders(spiders_dir):
+def get_spider_classes(spiders_dir):
     """
     Find classes with scrapy.Spider argument in spiders directory
     :param spiders_dir: spiders directory
@@ -293,6 +240,26 @@ def get_inputs(filename):
         index += 1
 
     return inputs
+
+
+# possibly obsolete
+def check_inputs(inputs):
+    if len(inputs) == 0:
+        return inputs
+
+    print('Inputs found:')
+
+    for i in range(1, len(inputs)):
+        print(str(inputs[i][0]), end=' ')
+        if inputs[i][1]:
+            print('with default value: ' + str(inputs[i][1]))
+        else:
+            print('without default value')
+
+    print('Do you want to edit inputs? [Y/N]')
+    answer = sys.stdin.readline().strip()
+    if not (answer == 'n' or answer == 'N'):
+        return inputs
 
 
 def get_input(line):
@@ -385,10 +352,11 @@ def get_default_value(line, index):
         return None
 
     # try to find string or int
-    while index < len(line) and not (
-            line[index] == '\'' or line[index] == '"' or line[index] == '-' or line[index].isdigit()):
+    while index < len(line) and \
+            not (line[index] == '\'' or line[index] == '"' or line[index] == '-' or line[index].isdigit()):
         index += 1
 
+    # check if quotes were found
     quotes = None
     if index >= len(line):
         return None
@@ -397,41 +365,73 @@ def get_default_value(line, index):
     elif line[index] == '"':
         quotes = '"'
 
+    # call respective method based on type
     if quotes is not None:
-        index += 1
-        first_quotes = index
-        while index < len(line) and line[index] != quotes:
-            index += 1
-        if index >= len(line):
-            return None
-        return line[first_quotes: index]
+        return get_default_string_value(line, index, quotes)
     elif line[index] == '-' or line[index].isdigit():
-        negative = False
-        if line[index] == '-':
-            negative = True
-            index += 1
-        first_digit = index
+        return get_default_number_value(line, index)
+
+    return None
+
+
+def get_default_string_value(line, index, quotes):
+    """
+    Find default string value of an attribute
+    :param line: line with default string value
+    :param index: current index on the line
+    :param quotes: type of quotes
+    """
+    index += 1
+    first_char = index
+
+    # read until second quote
+    while index < len(line) and line[index] != quotes:
+        index += 1
+
+    if index >= len(line):
+        return None
+
+    return line[first_char: index]
+
+
+def get_default_number_value(line, index):
+    """
+    Find default number value of an attribute
+    :param line: line with default string value
+    :param index: current index on the line
+    """
+    negative = False
+
+    if line[index] == '-':
+        negative = True
+        index += 1
+    first_digit_index = index
+
+    # read until index is on a digit
+    while index < len(line) and line[index].isdigit():
+        index += 1
+
+    if index >= len(line):
+        return None
+
+    # decimal numbers not supported, convert to string
+    if line[index] == '.':
+        index += 1
+        # read decimal points
         while index < len(line) and line[index].isdigit():
             index += 1
-
         if index >= len(line):
             return None
-        elif line[index] == '.':
-            # decimal numbers not supported, convert to string
-            index += 1
-            while index < len(line) and line[index].isdigit():
-                index += 1
-            if index >= len(line):
-                return None
-            if negative:
-                first_digit -= 1
-            return line[first_digit:index]
-
-        num = int(line[first_digit:index])
         if negative:
-            num *= -1
-        return num
+            first_digit_index -= 1
+
+        return line[first_digit_index:index]
+
+    num = int(line[first_digit_index:index])
+    if negative:
+        num *= -1
+    return num
 
 
-if __name__ == '__main__': # for debug purposes
-    parse_input()
+if __name__ == '__main__':  # for debug purposes
+    wrap_scrapy(r"C:\Users\Hoang\Desktop\bc\scrapy-project")

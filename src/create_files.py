@@ -1,6 +1,139 @@
 import os
+import re
+import subprocess
 
 
+##########################################
+# requirements.txt
+##########################################
+def update_reqs(dst):
+    """
+    Creates or updates requirements.txt of a project. Runs pipreqs. If requirements exists, appends with pipreqs result
+    :param dst: destination of scrapy project
+    :return: boolean of successfulness
+    """
+
+    # check correct dst
+    if not os.path.exists(os.path.join(dst, 'scrapy.cfg')):
+        print('Select root directory with "scrapy.cfg" file.')
+        return False
+
+    import pipreqs
+    reqs_file = os.path.join(dst, 'requirements.txt')
+
+    # check if requirements.txt exists
+    if not os.path.exists(os.path.join(dst, 'requirements.txt')):
+
+        # compat mode for ~= requirements, supress output
+        subprocess.run(["pipreqs", dst, "--mode", "compat"], stderr=subprocess.DEVNULL)
+        with open(reqs_file, 'r') as reqs:
+            unsafe_split_lines = [re.split('[~=<]=', x) for x in reqs.read().splitlines(keepends=False)]
+            lines = remove_invalid_reqs(unsafe_split_lines)
+        with open(reqs_file, 'w') as reqs:
+            reqs.writelines([x[0] + '~=' + x[1] + '\n' for x in lines])
+        print('Created requirements.txt')
+        return True
+
+    # create tmp file to save user requirements and call pipreqs
+    reqs_tmp = os.path.join(dst, '.tmp_reqs.tmp_apify')
+
+    if os.path.exists(reqs_tmp):
+        # if tmp file exists, removes it. It should be created only in runs before and shouldn't be user's file.
+        os.remove(reqs_tmp)
+
+    os.rename(reqs_file, reqs_tmp)
+    subprocess.run(["pipreqs", dst, "--mode", "compat"], stderr=subprocess.DEVNULL)
+
+    # check for duplicates
+    with open(reqs_file, 'r') as reqs:
+        reqs_lines = reqs.read().splitlines(keepends=False)
+    with open(reqs_tmp, 'r') as tmp:
+        tmp_lines = tmp.read().splitlines(keepends=False)
+
+    complete_reqs = concat_dedup_reqs(reqs_lines, tmp_lines)
+
+    with open(reqs_file, 'w') as reqs:
+        for req in complete_reqs:
+            reqs.write(req + '\n')
+
+    os.remove(reqs_tmp)
+    print('Created requirements.txt')
+    return True
+
+
+def concat_dedup_reqs(reqs_lines, user_lines):
+    """
+    Check lines of requirements and concatenates them and removes duplicates. Users' versions will be preferred
+    :param reqs_lines array of lines of the first requirements file
+    :param user_lines array of lines of the second requirements file
+    """
+    # split module name and version number
+    reqs_arr = [re.split('[~=<]=', line) for line in reqs_lines]
+    unsafe_tmp_arr = [re.split('[~=<]=', line) for line in user_lines]
+
+    # removes modules with non-numeric version
+    # bug of pipreqs which adds 'apify_scrapy_executor.egg==info' to requirements
+    user_arr = remove_invalid_reqs(unsafe_tmp_arr)
+
+    res = []
+    status = ('', -1)
+
+    for req in reqs_arr:
+        # skips modules with non-numeric version
+        if not is_valid_version(req[1]):
+            continue
+
+        for i in range(len(user_arr)):
+            if req[0] in user_arr[i]:
+                # duplicate name found
+                status = ('duplicate', i)
+                if req[1] == user_arr[i][1]:
+                    # same version
+                    res.append(req[0] + '~=' + req[1])
+                else:
+                    # choose users_version version
+                    res.append(req[0] + '==' + user_arr[i][1])
+                break
+            else:
+                # not duplicate
+                res.append(req[0] + '~=' + req[1])
+
+        if status[0] == 'duplicate':
+            # remove duplicate from tmp
+            user_arr.remove(user_arr[status[1]])
+            status = ('', -1)
+
+    # append reqs left in tmp
+    for req_left in user_arr:
+        res.append(req_left[0] + '~=' + req_left[1])
+
+    return res
+
+
+def remove_invalid_reqs(req_lines):
+    """
+    Removes modules with non-numeric version. Bug of pipreqs which adds 'apify_scrapy_executor.egg==info'
+    :param req_lines lines from requirements file
+    :returns array of safe lines
+    """
+    safe_lines = []
+    for req in req_lines:
+        if is_valid_version(req[1]):
+            safe_lines.append(req)
+    return safe_lines
+
+
+def is_valid_version(v):
+    """
+    Check if all values of version number separated by '.' is a numeric value
+    :returns boolean
+    """
+    return not (False in [x.isnumeric() for x in v.split('.')])
+
+
+##########################################
+# main.py
+##########################################
 def create_main_py(dst, module_name, path):
     """
     Creates main.py file and fills it with content
@@ -57,6 +190,9 @@ spider_executor = SpiderExecutor(getattr(module, '{module_name}'))
 spider_executor.run(dataset_id=os.environ['APIFY_DEFAULT_DATASET_ID'], args_dict=actor_input)"""
 
 
+##########################################
+# INPUT_SCHEMA.json
+##########################################
 def create_input_schema(dst, name, inputs):
     """
     Creates apify.json file and fills it with content
@@ -104,18 +240,15 @@ def get_properties(inputs):
     for inp in inputs:
         inp_type = 'string'
         editor = 'textfield'
-        prefill_type = 'prefill'
-
         prefill = ''
         if inp[1] is not None:
             if isinstance(inp[1], int):
                 inp_type = 'integer'
                 editor = 'number'
-                prefill_type = 'default'
                 prefill_value = inp[1]
             else:
                 prefill_value = f'"{inp[1]}"'
-            prefill = f""",\n\t\t\t"{prefill_type}": {prefill_value}"""
+            prefill = f""",\n\t\t\t"default": {prefill_value}"""
         properties += f""""{inp[0]}": {{
             "title": "{inp[0]}",
             "type": "{inp_type}",
@@ -125,6 +258,9 @@ def get_properties(inputs):
     return properties
 
 
+##########################################
+# apify.json
+##########################################
 def create_apify_json(dst: str):
     """
     Creates apify.json file and fills it with content
@@ -174,6 +310,9 @@ def get_apify_json_content(dst):
         return None
 
 
+##########################################
+# Dockerfile
+##########################################
 def create_dockerfile(dst):
     """
     Creates Dockerfile file and fills it with content
@@ -227,3 +366,69 @@ COPY . ./
 # By default, the main.py file is run
 CMD python3 main.py
 """
+
+
+##########################################
+# README.md
+##########################################
+def create_readme(dst, spider_name):
+    """
+    Creates Readme file and fills it with content
+    :param dst: directory in which file is created
+    :param spider_name: name of the spider
+    :return: boolean of successfulness
+    """
+    try:
+        apify_json = open(os.path.join(dst, "README.md"), "w")
+        apify_json.write(get_readme_content(spider_name))
+        apify_json.close()
+        print('Created README.md')
+    except FileExistsError:
+        print("Tried to create file 'README.md', but file already exists.")
+        return False
+    return True
+
+
+def get_readme_content(spider_name):
+    """
+    Returns content for README.md
+    :param spider_name: name of the spider
+    :return: str of README.md content
+    """
+    return f"""# Apify Scrapy {spider_name} project
+
+This file is generated by [Apify Scrapy Migrator](https://pypi.org/project/apify-scrapy-migrator/)
+
+The `README.md` file contains a documentation what your actor does and how to use it,
+which is then displayed in the app or Apify Store. It's always a good
+idea to write a good `README.md`, in a few months not even you
+will remember all the details about the actor.
+
+You can use [Markdown](https://www.markdownguide.org/cheat-sheet)
+language for rich formatting.
+
+## Documentation reference
+
+- [Apify Client for Python documentation](https://docs.apify.com/apify-client-python)
+- [Apify Actor documentation](https://docs.apify.com/actor)
+- [Apify CLI](https://docs.apify.com/cli)
+
+## Writing a README
+
+See our tutorial on [writing README's for your actors](
+https://help.apify.com/en/articles/2912548-how-to-write-great-readme-for-your-actors) if you need more inspiration. 
+
+### Table of contents
+
+If your README requires a table of contents, use the template below and make sure to keep the `<!-- toc start -->` 
+and `<!-- toc end -->` markers. 
+
+<!-- toc start -->
+- Introduction
+- Use Cases
+  - Case 1
+  - Case 2
+- Input
+- Output
+- Miscellaneous
+<!-- toc end -->"""
